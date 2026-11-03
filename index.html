@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Mac mini 遠端遙控</title>
+<style>
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:#0f1115;color:#e6e8ee;font-family:-apple-system,"PingFang TC",sans-serif;overflow:hidden}
+  #login{position:fixed;inset:0;display:flex;align-items:center;justify-content:center}
+  .card{background:#181b22;border:1px solid #2a2f3a;border-radius:14px;padding:28px;width:min(340px,90vw);text-align:center}
+  .card h1{font-size:20px;margin:0 0 6px}.card p{margin:0 0 18px;color:#8b93a5;font-size:13px}
+  input,button,select{font:inherit;color:inherit}
+  input[type=password],input[type=text]{width:100%;padding:11px 12px;border-radius:9px;border:1px solid #333a48;background:#0f1115}
+  button{cursor:pointer;border:0;border-radius:9px;padding:10px 14px;background:#3b82f6;color:#fff}
+  button.sec{background:#2a2f3a}
+  #err{color:#f87171;min-height:18px;font-size:13px;margin-top:10px}
+  #app{position:fixed;inset:0;display:none;flex-direction:column}
+  #bar{display:flex;gap:8px;align-items:center;padding:6px 10px;background:#181b22;border-bottom:1px solid #2a2f3a;flex-wrap:wrap;font-size:13px}
+  #bar .dot{width:9px;height:9px;border-radius:50%;background:#ef4444}#bar .dot.on{background:#22c55e}
+  #bar button{padding:6px 10px;font-size:13px}
+  #bar select{background:#2a2f3a;border:0;border-radius:8px;padding:6px}
+  #stage{flex:1;display:flex;align-items:center;justify-content:center;min-height:0;position:relative}
+  canvas{max-width:100%;max-height:100%;background:#000;touch-action:none;outline:none;cursor:crosshair}
+  #msg{position:absolute;color:#8b93a5;pointer-events:none}
+  #textbox{display:none;gap:8px;padding:8px 10px;background:#181b22;border-top:1px solid #2a2f3a}
+</style>
+</head>
+<body>
+<div id="login">
+  <div class="card">
+    <h1>🖥 Mac mini 遠端遙控</h1><p>請輸入伺服器位址與存取密碼</p>
+    <input id="srv" type="text" placeholder="伺服器位址，例如 xxxx.trycloudflare.com" style="margin-bottom:8px" autocapitalize="off" autocorrect="off">
+    <input id="pw" type="password" placeholder="密碼" autocomplete="current-password">
+    <button id="go" style="margin-top:12px;width:100%">連線</button>
+    <div id="err"></div>
+  </div>
+</div>
+<div id="app">
+  <div id="bar">
+    <span class="dot" id="dot"></span><span id="status">連線中…</span>
+    <span style="flex:1"></span>
+    <select id="q" title="畫質">
+      <option value="40,10,1280">流暢</option>
+      <option value="60,12,1600" selected>標準</option>
+      <option value="80,15,2200">高畫質</option>
+    </select>
+    <button class="sec" id="btnText">輸入文字</button>
+    <button class="sec" id="btnFull">全螢幕</button>
+    <button class="sec" id="btnOut">登出</button>
+  </div>
+  <div id="stage"><canvas id="cv" tabindex="0" width="16" height="9"></canvas><div id="msg">等待畫面…</div></div>
+  <div id="textbox">
+    <input type="text" id="txt" placeholder="輸入文字（支援中文），按送出貼到 Mac mini" style="flex:1">
+    <button id="sendTxt">送出</button>
+  </div>
+</div>
+<script>
+const $ = id => document.getElementById(id);
+const cv = $('cv'), ctx = cv.getContext('2d');
+let ws, authed = false, pw = '';
+let retry = 0;
+
+// 伺服器位址：?server= 參數 > 上次輸入 > 若網頁就是由伺服器提供則用同一個主機
+function normServer(v) {
+  v = (v || '').trim().replace(/^(https?|wss?):\/\//, '').replace(/\/+$/, '');
+  return v;
+}
+const isPages = /github\.io$/.test(location.hostname);
+let server = normServer(new URLSearchParams(location.search).get('server') || localStorage.getItem('rd_server') || (isPages ? '' : location.host));
+$('srv').value = server;
+if (!isPages && server === location.host) $('srv').style.display = 'none';
+function connect() {
+  const local = /^(localhost|127\.|192\.168\.|10\.)/.test(server);
+  const proto = (location.protocol === 'https:' || !local) ? 'wss' : 'ws';
+  try { ws = new WebSocket(`${proto}://${server}/viewer`); } catch { $('err').textContent = '伺服器位址格式錯誤'; return; }
+  ws.binaryType = 'blob';
+  ws.onopen = () => { if (pw) ws.send(JSON.stringify({ t: 'auth', pw })); };
+  ws.onmessage = onMsg;
+  ws.onclose = () => {
+    if (!authed) { $('err').textContent = $('err').textContent || '無法連到伺服器，請確認位址與 Server 是否在跑'; return; }
+    if (authed) { $('status').textContent = '連線中斷，重連中…'; $('dot').classList.remove('on'); setTimeout(connect, Math.min(5000, 1000 * ++retry)); }
+  };
+}
+let drawing = false;
+async function onMsg(e) {
+  if (typeof e.data !== 'string') {
+    if (drawing) return; drawing = true;   // 來不及畫就丟掉舊影格
+    try {
+      const bmp = await createImageBitmap(e.data);
+      if (cv.width !== bmp.width || cv.height !== bmp.height) { cv.width = bmp.width; cv.height = bmp.height; }
+      ctx.drawImage(bmp, 0, 0); bmp.close(); $('msg').style.display = 'none';
+    } catch {}
+    drawing = false; return;
+  }
+  const m = JSON.parse(e.data);
+  if (m.t === 'authok') { authed = true; try { localStorage.setItem('rd_server', server); } catch {} retry = 0; $('login').style.display = 'none'; $('app').style.display = 'flex'; applyQuality(); cv.focus(); }
+  else if (m.t === 'authfail') { $('err').textContent = m.msg; pw = ''; }
+  else if (m.t === 'agent') { $('dot').classList.toggle('on', m.online); $('status').textContent = m.online ? 'Mac mini 已連線' : 'Mac mini 離線（請確認 Agent 有在跑）'; if (!m.online) $('msg').style.display = ''; }
+}
+const send = o => ws && ws.readyState === 1 && authed && ws.send(JSON.stringify(o));
+
+$('go').onclick = () => {
+  const s = normServer($('srv').value); pw = $('pw').value; $('err').textContent = '';
+  if (!s) { $('err').textContent = '請輸入伺服器位址'; return; }
+  if (s !== server || !ws || ws.readyState > 1) { server = s; if (ws) { ws.onclose = null; try { ws.close(); } catch {} } connect(); return; }
+  if (ws.readyState === 1) ws.send(JSON.stringify({ t: 'auth', pw }));
+};
+$('pw').onkeydown = e => { if (e.key === 'Enter') $('go').click(); };
+$('btnOut').onclick = () => { authed = false; pw = ''; ws.close(); location.reload(); };
+$('btnFull').onclick = () => document.fullscreenElement ? document.exitFullscreen() : $('stage').requestFullscreen?.();
+$('btnText').onclick = () => { const t = $('textbox'); t.style.display = t.style.display === 'flex' ? 'none' : 'flex'; if (t.style.display === 'flex') $('txt').focus(); };
+$('sendTxt').onclick = () => { const s = $('txt').value; if (s) { send({ t: 'text', s }); $('txt').value = ''; } };
+$('txt').onkeydown = e => { if (e.key === 'Enter') $('sendTxt').click(); };
+function applyQuality() { const [quality, fps, maxw] = $('q').value.split(',').map(Number); send({ t: 'settings', quality, fps, maxw }); }
+$('q').onchange = applyQuality;
+
+// ---- 滑鼠 ----
+const pos = e => { const r = cv.getBoundingClientRect(); return { x: Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)), y: Math.min(1, Math.max(0, (e.clientY - r.top) / r.height)) }; };
+let lastMove = 0, held = null;
+cv.addEventListener('pointermove', e => {
+  if (e.pointerType === 'touch') return;
+  const now = performance.now(); if (now - lastMove < 25) return; lastMove = now;
+  send({ t: 'move', ...pos(e), drag: held !== null, b: held ?? 0 });
+});
+cv.addEventListener('pointerdown', e => {
+  if (e.pointerType === 'touch') return;
+  cv.focus(); cv.setPointerCapture(e.pointerId); held = e.button; send({ t: 'down', ...pos(e), b: e.button });
+});
+cv.addEventListener('pointerup', e => {
+  if (e.pointerType === 'touch') return;
+  held = null; send({ t: 'up', ...pos(e), b: e.button });
+});
+cv.addEventListener('contextmenu', e => e.preventDefault());
+cv.addEventListener('wheel', e => { e.preventDefault(); send({ t: 'wheel', dx: e.deltaX, dy: e.deltaY }); }, { passive: false });
+
+// ---- 觸控：點一下=左鍵，長按=右鍵，雙指=捲動 ----
+let tStart = null, tMoved = false, tTimer = null, twoY = null;
+cv.addEventListener('touchstart', e => {
+  e.preventDefault();
+  if (e.touches.length === 2) { twoY = e.touches[0].clientY; clearTimeout(tTimer); return; }
+  const t = e.touches[0]; tStart = pos(t); tMoved = false;
+  send({ t: 'move', ...tStart });
+  tTimer = setTimeout(() => { if (!tMoved) { send({ t: 'down', ...tStart, b: 2 }); send({ t: 'up', ...tStart, b: 2 }); tStart = null; } }, 600);
+}, { passive: false });
+cv.addEventListener('touchmove', e => {
+  e.preventDefault();
+  if (e.touches.length === 2 && twoY !== null) { const y = e.touches[0].clientY; send({ t: 'wheel', dx: 0, dy: (twoY - y) * 2 }); twoY = y; return; }
+  const p = pos(e.touches[0]); if (tStart && Math.hypot(p.x - tStart.x, p.y - tStart.y) > 0.01) { tMoved = true; clearTimeout(tTimer); }
+  send({ t: 'move', ...p }); tStart = tStart && p;
+}, { passive: false });
+cv.addEventListener('touchend', e => {
+  e.preventDefault(); clearTimeout(tTimer);
+  if (twoY !== null && e.touches.length === 0) { twoY = null; return; }
+  if (tStart && !tMoved) { send({ t: 'down', ...tStart, b: 0 }); send({ t: 'up', ...tStart, b: 0 }); }
+  tStart = null;
+}, { passive: false });
+
+// ---- 鍵盤 ----
+cv.addEventListener('keydown', e => { e.preventDefault(); if (!e.repeat || e.key.length === 1 || e.key.startsWith('Arrow') || e.key === 'Backspace') send({ t: 'kd', k: e.key }); });
+cv.addEventListener('keyup', e => { e.preventDefault(); send({ t: 'ku', k: e.key }); });
+cv.addEventListener('blur', () => ['Shift', 'Control', 'Alt', 'Meta'].forEach(k => send({ t: 'ku', k })));
+
+if (server) connect();
+</script>
+</body>
+</html>
